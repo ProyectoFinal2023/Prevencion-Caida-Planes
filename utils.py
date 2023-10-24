@@ -106,7 +106,7 @@ def clean_accented_chars(text):
 
 def parse_html_response(response):
 
-    try:
+    if True: #try:
         # Parse the HTML using lxml
         tree = html.fromstring(response)
 
@@ -139,10 +139,10 @@ def parse_html_response(response):
         data = df.to_json(orient="records")
         situacion = int(max(df["Situacion"]))
         print(situacion)
-    except Exception as e:
-        print(e)
-        data = "La persona no posee deudas registradas"
-        situacion = 1
+    #except Exception as e:
+    #    print(e)
+    #    data = "La persona no posee deudas registradas"
+    #    situacion = 1
 
     contactar = "SI" if situacion > 1 else "NO"
     estado = ESTADOS[situacion]
