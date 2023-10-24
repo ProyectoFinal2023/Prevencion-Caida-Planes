@@ -79,7 +79,8 @@ def get_debt_situation(cuit: int):
             playwright.stop()
 
             return response.text
-    except:
+    except Exception as e:
+        print(e)
         return None
 
 def clean_accented_chars(text):
