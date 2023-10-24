@@ -39,6 +39,8 @@ def get_debt_situation(cuit: int):
             with recaptchav2.SyncSolver(page) as solver:
                 token = solver.solve_recaptcha(wait=True)
 
+            print(222222222222)
+            
             cookie_jar = http.cookiejar.CookieJar()
             for cookie in page.context.cookies():
                 cookie.pop("httpOnly")
