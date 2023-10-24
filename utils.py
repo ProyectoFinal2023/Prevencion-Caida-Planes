@@ -136,11 +136,11 @@ def parse_html_response(response):
         df.columns = [x[:-1] for x in df.columns]
         df.columns = [clean_accented_chars(col) for col in df.columns]
 
-        print
         data = df.to_json(orient="records")
         situacion = int(max(df["Situacion"]))
         print(situacion)
     except Exception as e:
+        print(e)
         data = "La persona no posee deudas registradas"
         situacion = 1
 
