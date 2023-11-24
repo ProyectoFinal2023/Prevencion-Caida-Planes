@@ -1,153 +1,229 @@
-from playwright.sync_api import sync_playwright
-from playwright_recaptcha import recaptchav2
-from playwright_stealth import stealth_sync
-import requests
-import http.cookiejar
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
+import os
 import pandas as pd
-from lxml import html
+import urllib.parse
+import json
+import requests
+import os
+import pickle
 
 ESTADOS = {
-    1: "En situación normal",
+    1: "En situacion normal",
     2: "Con seguimiento especial",
     3: "Con problemas",
     4: "Con alto riesgo de insolvencia",
     5: "Irrecuperable",
-    6: "Irrecuperable por disposición técnica",
+    6: "Irrecuperable por disposicion técnica",
 }
 
 RIESGOS = {
-    1: "Situación normal",
+    1: "Situacion normal",
     2: "Riesgo bajo",
     3: "Riesgo medio",
     4: "Riesgo alto",
     5: "Irrecuperable",
-    6: "Irrecuperable por disposición técnica",
+    6: "Irrecuperable por disposicion tecnica",
 }
 
 
-def get_debt_situation(cuit: int):
+def get_engine():
+    load_dotenv()
 
-    try:
+    db_user = os.environ.get("DB_USER")
+    db_pass = os.environ.get("DB_PASS")
+    db_host = os.environ.get("DB_HOST")
+    db_port = os.environ.get("DB_PORT")
+    db_name = os.environ.get("DB_NAME")
 
-        with sync_playwright() as playwright:
-            browser = playwright.firefox.launch()
-            page = browser.new_page()
-            stealth_sync(page)
-            page.goto("https://www.bcra.gob.ar/BCRAyVos/Situacion_Crediticia.asp")
-
-            with recaptchav2.SyncSolver(page) as solver:
-                token = solver.solve_recaptcha(wait=True)
-
-            cookie_jar = http.cookiejar.CookieJar()
-            for cookie in page.context.cookies():
-                cookie.pop("httpOnly")
-                cookie.pop("sameSite")
-                cookie["version"] = 0
-                cookie["port"] = None
-                cookie["port_specified"] = False
-                cookie["domain_specified"] = False
-                cookie["domain_initial_dot"] = False
-                cookie["path_specified"] = True
-                cookie["discard"] = False
-
-                cookie["comment"] = None
-                cookie["comment_url"] = None
-                cookie["rest"] = {}
-
-                cookie_jar.set_cookie(http.cookiejar.Cookie(**cookie))
-
-            s = requests.session()
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.3",
-                "Referer": "https://www.bcra.gob.ar/BCRAyVos/Situacion_Crediticia.asp",
-            }
-
-            # Make an initial GET request
-            s.get(
-                "https://www.bcra.gob.ar/BCRAyVos/Situacion_Crediticia.asp", headers=headers
-            )
-
-            response = s.post(
-                url="https://www.bcra.gob.ar/BCRAyVos/Situacion_Crediticia.asp",
-                data={"g-recaptcha-response": token, "CUIT": str(cuit), "Action": "Go"},
-                headers=headers,
-                cookies=cookie_jar,
-            )
-
-            page.close()
-            playwright.stop()
-
-            return response.text
-    except Exception as e:
-        print(e)
-        return None
-
-def clean_accented_chars(text):
-    """Replace accented characters with unaccented counterparts."""
-    replacements = {
-        "á": "a",
-        "é": "e",
-        "í": "i",
-        "ó": "o",
-        "ú": "u",
-        "Á": "A",
-        "É": "E",
-        "Í": "I",
-        "Ó": "O",
-        "Ú": "U",
-        # Add more replacements if needed
-    }
-
-    for char, replacement in replacements.items():
-        text = text.replace(char, replacement)
-
-    return text
+    new_pass = urllib.parse.quote_plus(db_pass)
+    url = f"postgresql+pg8000://{db_user}:{new_pass}@{db_host}:{db_port}/{db_name}"
+    return create_engine(url, pool_size=20, max_overflow=0)
 
 
-def parse_html_response(response):
+ENGINE = get_engine()
 
-    if True: #try:
-        # Parse the HTML using lxml
-        tree = html.fromstring(response)
 
-        # Use XPath to extract data
-        rows = tree.xpath("//table//tr")
+def search_cuit_cache(cuit: int):
+    query = (
+        "SELECT response FROM cache.api_response "
+        f"WHERE cuit = {cuit} "
+        "ORDER BY id DESC "
+        "LIMIT 1"
+    )
+    df = pd.read_sql_query(query, ENGINE)
 
-        data = []
-        for row in rows:
-            cols = [td.text_content().strip() for td in row.xpath(".//td")]
+    if not df.empty:
+        return df.iloc[0]["response"]
+    return None
 
-            # If the first element of a row is empty or contains only whitespace, break
-            if not cols or not cols[0]:
-                break
 
-            # Check if row has meaningful data (in this case, more than 2 non-empty cells)
-            if len(cols) > 2:
-                data.append(cols)
+def get_api_token():
+    url = "http://checkone.worldsys.com.ar/api/login"
+    payload = {"email": "abergoglio@frba.utn.edu.ar", "password": "F!pzn8jHJj|5V@91"}
+    response = requests.request("POST", url, data=payload)
+    return response.json()["success"]["token"]
 
-        # Ensure all rows match header length
-        header_length = len(data[0])
-        for i in range(1, len(data)):
-            while len(data[i]) < header_length:
-                data[i].append(None)
 
-        # Create a Pandas DataFrame
-        df = pd.DataFrame(data[1:], columns=data[0])
-        df.columns = [x[:-1] for x in df.columns]
-        df.columns = [clean_accented_chars(col) for col in df.columns]
+def external_api_request(cuit, token):
 
-        data = df.to_json(orient="records")
-        situacion = int(max(df["Situacion"]))
-        print(situacion)
-    #except Exception as e:
-    #    print(e)
-    #    data = "La persona no posee deudas registradas"
-    #    situacion = 1
+    url = "http://checkone.worldsys.com.ar/api/v2/checkone"
 
-    contactar = "SI" if situacion > 1 else "NO"
+    payload = json.dumps(
+        {"idtributaria": cuit, "plan": "deudores", "informePdf": False}
+    )
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+
+    response = requests.request("POST", url, headers=headers, data=payload)
+
+    return response.json()
+
+
+def save_token(token):
+    query = text("INSERT INTO cache.api_key (key) VALUES (:token)").bindparams(
+        token=token
+    )
+
+    with ENGINE.connect() as connection:
+        connection.execute(query)
+        connection.commit()
+
+
+def save_response(cuit, response):
+
+    query = text(
+        """
+        INSERT INTO cache.api_response (cuit,response) VALUES (:cuit ::bigint, :response ::jsonb)
+    """
+    ).bindparams(cuit=cuit, response=json.dumps(response))
+
+    with ENGINE.connect() as connection:
+        connection.execute(query)
+        connection.commit()
+
+
+def get_cached_token():
+    now = datetime.now()
+    twenty_four_hours_ago = now - timedelta(hours=24)
+
+    query = text(
+        f"""
+        SELECT key FROM cache.api_key
+        WHERE created_date >= '{twenty_four_hours_ago}'
+        ORDER BY created_date DESC
+        LIMIT 1
+    """
+    )
+
+    df = pd.read_sql_query(query, ENGINE)
+
+    if not df.empty:
+        return df.iloc[0]["key"]
+    return None
+
+
+def get_unpaid_installments(cuit):
+    query = text(
+        f"""
+        select cuotas_impagas 
+        from etl.dim_cliente dc 
+        inner join etl.fact_plan fp 
+        on dc.cliente_id  = fp.cliente_id
+        inner join etl.dim_tiempo dt
+        on dt.tiempo_id = fp.tiempo_id
+        where dc.cuit_cuil={cuit}
+        order by anio DESC, mes DESC, dia DESC
+        LIMIT 1
+    """
+    )
+
+    df = pd.read_sql_query(query, ENGINE)
+
+    if not df.empty:
+        return df.iloc[0]["cuotas_impagas"]
+    return None
+
+
+def analyze_json(data, cuit):
+    print(data)
+
+    dfs = {}
+
+    # Create a DataFrame only if 'info' key exists for the given block
+    if "info" in data["res"]["bloques"]["LDISASD24_MNT"]:
+        dfs["LDISASD24_MNT"] = pd.DataFrame(
+            data["res"]["bloques"]["LDISASD24_MNT"]["info"]
+        )
+
+    if "info" in data["res"]["bloques"]["LDISASDEU_MNT"]:
+        dfs["LDISASDEU_MNT"] = pd.DataFrame(
+            data["res"]["bloques"]["LDISASDEU_MNT"]["info"]
+        )
+
+    if "info" in data["res"]["bloques"]["LDISASDEX_MNT"]:
+        dfs["LDISASDEX_MNT"] = pd.DataFrame(
+            data["res"]["bloques"]["LDISASDEX_MNT"]["info"]
+        )
+
+    # Now concatenate only the DataFrames that have been created
+    combined_df = pd.concat(dfs.values(), ignore_index=True) if dfs else pd.DataFrame()
+
+    if not combined_df.empty:
+
+        combined_df = combined_df[combined_df["monto"] != 0]
+        combined_df = combined_df.rename(
+            {"sit": "situacion", "nomEnt": "entidad", "diasAtraso": "dias_atraso"},
+            axis=1,
+        )
+        combined_df = combined_df.drop(["codEnt", "sitDes"], axis=1)
+        combined_df = combined_df.replace({"N/A": 0})
+        combined_df["periodo"] = combined_df["periodo"].apply(
+            lambda x: x[:4] + "-" + x[4:]
+        )
+        combined_df = combined_df.sort_values("periodo")
+        combined_df = combined_df.fillna(value=0)
+        combined_df["dias_atraso"] = combined_df["dias_atraso"].astype(int)
+        combined_df["monto"] = combined_df["monto"] / 1000
+
+        combined_df = combined_df[
+            ["situacion", "monto", "entidad", "periodo", "dias_atraso"]
+        ]
+
+        nombre = data["res"]["nombre"]
+
+        data = combined_df.to_dict(orient="records")
+        situacion = int(max(combined_df["situacion"]))
+
+    else:
+        data = "El usuario no posee deudas registradas"
+        situacion=1
+
     estado = ESTADOS[situacion]
     riesgo = RIESGOS[situacion]
 
-    return {"data": data, "contactar": contactar, "estado": estado, "riesgo": riesgo}
+    cuotas_impagas = get_unpaid_installments(cuit)
 
+    usuario_registrado = 0 if cuotas_impagas is None else 1
+
+    cuotas_impagas = int(cuotas_impagas) if cuotas_impagas is not None else 0
+
+    with open('prediction_model.pkl', 'rb') as file:
+        modelo_predictivo = pickle.load(file)
+   
+    contactar = modelo_predictivo.predict(combined_df)
+
+    response = {
+        "data": data,
+        "contactar": contactar,
+        "estado": estado,
+        "riesgo": riesgo,
+        "cuotas_impagas": cuotas_impagas,
+        "usuario_registrado": usuario_registrado,
+        "nombre": nombre,
+        "cuit": cuit
+        
+    }
+    return json.dumps(response)

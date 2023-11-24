@@ -1,17 +1,41 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-from utils import get_debt_situation, parse_html_response
+import pandas as pd
 
-app = FastAPI()
+from utils import (
+    analyze_json,
+    search_cuit_cache,
+    external_api_request,
+    get_api_token,
+    get_cached_token,
+    save_response,
+    save_token,
+)
 
-@app.get("/get_debt/{cuit:int}")
+
+def lambda_handler(event, context):
+
+    cuit = event["pathParameters"]["cuit"]
+
+    return get_debt(cuit)
+
+
 def get_debt(cuit: int):
-    try:
-        html_response = get_debt_situation(cuit)
-        parsed_data = parse_html_response(html_response)
-        parsed_data["CUIT"] = cuit
-        return parsed_data
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"detail": str(e)})
 
-# If you want to add more endpoints, add them below this line.
+    token = get_cached_token()
+    if token is None:
+        token = get_api_token()
+        save_token(token)
+
+    cached = search_cuit_cache(cuit)
+
+    if cached is None:
+        partial_response = external_api_request(cuit, token)
+        save_response(cuit, partial_response)
+        response = analyze_json(partial_response, cuit)
+
+    else:
+        response = analyze_json(cached, cuit)
+
+    return response
+
+
+print(get_debt(27163225382))
